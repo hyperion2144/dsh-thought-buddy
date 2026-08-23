@@ -560,9 +560,17 @@ function tbRunAvatar(
   return { stop };
 }
 
-/** 在一个 turnStatus 元素上挂载 GrokBot 头像 + 表情联动的打字机文字。 */
-function tbMountAvatar(root: Element, cfg: TbConfig): TbHandle | null {
-  if (root.querySelector('[data-thought-buddy]') !== null) return null;
+/**
+ * 在 dshLoader.ui 提供的挂载节点里渲染 GrokBot 头像，并联动状态条打字机文字。
+ *
+ * 放置由 slot 引擎负责（`conversation.status` 锚点声明了 `insert: 'prepend'`），
+ * 因此本函数只往 `mount` 里追加内容，不再自己 insertBefore；幂等与自愈也由引擎
+ * 保证，原先的 `[data-thought-buddy]` 去重判断随之移除。
+ *
+ * @param mount 引擎创建的挂载节点（已插入状态条内部最前）。
+ * @param host  状态条元素本身——打字机需要它的文本节点。
+ */
+function tbMountAvatar(mount: Element, host: Element, cfg: TbConfig): TbHandle | null {
   const dark =
     typeof matchMedia === 'function' &&
     matchMedia('(prefers-color-scheme: dark)').matches;
@@ -570,9 +578,10 @@ function tbMountAvatar(root: Element, cfg: TbConfig): TbHandle | null {
   const wrap = document.createElement('span');
   wrap.setAttribute('data-thought-buddy', 'avatar');
   wrap.appendChild(engine.svg);
-  root.insertBefore(wrap, root.firstChild);
-  engine.root = root;
-  const typewriter = tbStartTypewriter(root);
+  mount.appendChild(wrap);
+  // rAF 循环以挂载节点为存活基准：引擎在卸载或宿主重渲染时移除它，动画随即自停。
+  engine.root = mount;
+  const typewriter = tbStartTypewriter(host);
   const handle = tbRunAvatar(engine, cfg, () => typewriter?.switchWord());
   return {
     stop: () => {
@@ -582,16 +591,15 @@ function tbMountAvatar(root: Element, cfg: TbConfig): TbHandle | null {
   };
 }
 
-/** 在一个 turnStatus 元素上挂载 emoji 轮播。 */
-function tbMountEmoji(root: Element, cfg: TbConfig): TbHandle | null {
-  if (root.querySelector('[data-thought-buddy]') !== null) return null;
+/** 在 dshLoader.ui 提供的挂载节点里渲染 emoji 轮播。 */
+function tbMountEmoji(mount: Element, cfg: TbConfig): TbHandle | null {
   const span = document.createElement('span');
   span.setAttribute('data-thought-buddy', 'emoji');
   span.textContent = cfg.emojis[0] || '🤿';
-  root.insertBefore(span, root.firstChild);
+  mount.appendChild(span);
   let index = 0;
   const timer = setInterval(() => {
-    if (!root.isConnected) {
+    if (!span.isConnected) {
       clearInterval(timer);
       return;
     }
@@ -612,78 +620,71 @@ function tbMountEmoji(root: Element, cfg: TbConfig): TbHandle | null {
   return { stop: () => clearInterval(timer) };
 }
 
-/* ============================= 观察器 ============================= */
+/* ====================== dshLoader.ui slot 注入 ====================== */
+
+/** dshLoader.ui 中本插件用到的最小面（避免为纯脚本引入类型依赖）。 */
+interface TbUiApi {
+  mount(
+    anchor: string,
+    spec: {
+      id: string;
+      when?: (host: Element) => boolean;
+      render: (mount: HTMLElement, host: Element) => (() => void) | void;
+    },
+  ): () => void;
+}
 
 /**
- * 启动：监听 DOM，在会话的「Deep diving...」状态条（[data-conversation-scroll]
- * 内的 [role="status"]）前插入小表情。React 重渲染不会触碰我们插入的节点；
- * 万一被清掉，下一帧 mutation 会补回。返回清理函数。
+ * 启动：把小表情挂到 dsh-loader 的 `conversation.status` 锚点上。
+ *
+ * 从「自己维护一套 DOM 注入」改为「向 loader 注册一个 slot」之后，下面这些不再
+ * 由本插件实现，而由 `dshLoader.ui` 统一提供：
+ *   - MutationObserver 与 requestAnimationFrame 合流节流；
+ *   - 宿主选择器（主路径 `[data-conversation-scroll] [role="status"]` 与全文档
+ *     兜底路径），现在是 loader 锚点表里的一条，dsh 改 DOM 只需改 loader；
+ *   - 每宿主幂等、React 重渲染后的自愈补回、宿主脱离文档时的清理。
+ *
+ * 本插件只保留两件真正属于自己的判断：状态条文案是否是「Deep diving…」这类，
+ * 以及渲染哪种表情。返回值是 loader 给的 disposer。
  */
-function tbStart(): () => void {
+function tbStart(ui: TbUiApi): () => void {
   const cfg = tbConfig();
   if (!cfg.enabled) return () => {};
   tbInjectStyles();
 
-  const mounted = new Map<Element, TbHandle>(); // statusEl -> handle
-
-  const scan = (): void => {
-    const roots = new Set<Element>();
-    // 主路径：会话滚动容器内的状态条；辅路径：任意含 "diving" 文案的 status。
-    for (const el of document.querySelectorAll(
-      '[data-conversation-scroll] [role="status"]',
-    )) {
-      if (/diving/i.test(el.textContent ?? '')) roots.add(el);
-    }
-    for (const el of document.querySelectorAll('[role="status"]')) {
-      if (/diving/i.test(el.textContent ?? '')) roots.add(el);
-    }
-    for (const el of roots) {
-      if (mounted.has(el)) continue;
-      const handle =
-        cfg.mode === 'emoji'
-          ? tbMountEmoji(el, cfg)
-          : tbMountAvatar(el, cfg);
-      if (handle !== null) mounted.set(el, handle);
-    }
-    for (const [el, handle] of [...mounted]) {
-      if (!el.isConnected) {
-        handle.stop();
-        mounted.delete(el);
-      }
-    }
-  };
-
-  let scheduled = false;
-  const observer = new MutationObserver(() => {
-    if (scheduled) return;
-    scheduled = true;
-    requestAnimationFrame(() => {
-      scheduled = false;
-      scan();
-    });
+  return ui.mount('conversation.status', {
+    id: 'thought-buddy:buddy',
+    // 锚点给出候选状态条；「是不是思考态」仍由本插件按文案判定。
+    when: (host) => /diving/i.test(host.textContent ?? ''),
+    render: (mount, host) => {
+      const handle = cfg.mode === 'emoji' ? tbMountEmoji(mount, cfg) : tbMountAvatar(mount, host, cfg);
+      return () => handle?.stop();
+    },
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  scan();
-
-  return () => {
-    observer.disconnect();
-    for (const handle of mounted.values()) handle.stop();
-    mounted.clear();
-  };
 }
 
 /* ========================= 插件入口 ========================= */
 
-// cordis 服务依赖：本插件只用 ctx.effect，不消费任何服务，故为空。
-// 注意：这里的 inject 是 cordis 服务名（由 runtime 等提供），
-// 与 package.json 的 dsh.client.inject（客户端模块依赖声明）不是一回事。
-const inject: unknown[] = [];
+/**
+ * cordis 服务依赖：`dshLoaderUi` 由 @dsh-plugin/dsh-loader 的浏览器半区
+ * `ctx.provide('dshLoaderUi', ui)` 提供。声明它有两个作用：cordis 保证 loader
+ * 先激活（`dsh.client.immediately` 只保证工厂已注册，不保证 apply 已跑），并且
+ * loader 缺席时本插件不会激活，而不是崩在 undefined 上。
+ *
+ * 注意：这里的 inject 是 cordis 服务名，与 package.json 的 dsh.client.inject
+ * （客户端模块依赖声明，用包名）不是一回事。
+ */
+const inject: unknown[] = ['dshLoaderUi'];
 
-/** 客户端 cordis Context 的最小结构（本插件只用 ctx.effect）。 */
+/** 客户端 cordis Context 的最小结构。 */
 interface TbClientContext {
   effect(callback: () => () => void): unknown;
+  dshLoaderUi?: TbUiApi;
+  get?(name: string): unknown;
 }
 
 function apply(ctx: TbClientContext) {
-  ctx.effect(() => tbStart());
+  const ui = ctx.dshLoaderUi ?? (ctx.get?.('dshLoaderUi') as TbUiApi | undefined);
+  if (ui === undefined) return;
+  ctx.effect(() => tbStart(ui));
 }

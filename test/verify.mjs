@@ -38,10 +38,22 @@ class FakeNode {
     this.childNodes = []
     this.style = {}
     this.parentNode = null
-    this.isConnected = true
+    this._detached = false
     this.textContent = ''
     this.dataset = {}
   }
+  /**
+   * 与真实 DOM 一致地向下传播：祖先脱离文档，后代的 isConnected 也随之为 false。
+   *
+   * 这一点在迁移到 dshLoader.ui 之后变得重要——rAF 循环的存活基准从「状态条」
+   * 改成了「loader 提供的挂载节点」（既能感知宿主脱离，也能感知 React 只清空了
+   * 宿主子节点）。若桩不传播，测试会误判动画没有自停。
+   */
+  get isConnected() {
+    if (this._detached) return false
+    return this.parentNode ? this.parentNode.isConnected : true
+  }
+  set isConnected(value) { this._detached = !value }
   setAttribute(k, v) { this.attrs[k] = String(v) }
   getAttribute(k) { return this.attrs[k] }
   removeAttribute(k) { delete this.attrs[k] }
@@ -102,8 +114,57 @@ function createHarness({ now = () => Date.now() } = {}) {
   }
   createContext(context)
 
+  /**
+   * dshLoader.ui 的最小替身。
+   *
+   * 插件不再自己观察 DOM，而是向 loader 注册一个 slot，因此这里忠实复刻
+   * ui.mount 对插件可见的那部分语义：解析锚点得到宿主 → 过 when 判定 → 创建带
+   * data-dshl-slot 的挂载节点并按 prepend 放置 → 调 render(mount, host) → 返回
+   * 执行 cleanup 的 disposer。
+   *
+   * 观察器、rAF 合流与自愈补回属于 loader 的职责，由 dsh-loader 自己的 jsdom
+   * 测试覆盖，不在本产物校验范围内。
+   */
+  const uiStub = {
+    mount(anchor, spec) {
+      const hosts = context.document.querySelectorAll(`[${anchor}] [role="status"]`)
+      const cleanups = []
+      for (const host of hosts) {
+        if (typeof spec.when === 'function' && !spec.when(host)) continue
+        const mount = context.document.createElement('span')
+        mount.setAttribute('data-dshl-slot', spec.id)
+        host.insertBefore(mount, host.children[0])
+        const cleanup = spec.render(mount, host)
+        cleanups.push(() => {
+          if (typeof cleanup === 'function') cleanup()
+          if (mount.parentNode) {
+            mount.parentNode.children = mount.parentNode.children.filter((c) => c !== mount)
+          }
+        })
+      }
+      return () => {
+        for (const c of cleanups) c()
+      }
+    },
+  }
+
   const mod = runInContext(`(function () {\n${inner}\nreturn { apply, inject };\n})()`, context)
-  return { mod, fakeRoot, textNode, rafQueue, timers, context }
+  return { mod, fakeRoot, textNode, rafQueue, timers, context, uiStub }
+}
+
+/**
+ * 找到插件渲染出的表情节点。
+ *
+ * 层级比迁移前多一层：loader 先在状态条里放一个 data-dshl-slot 挂载节点，插件
+ * 再往其中追加 data-thought-buddy。
+ */
+function buddySpan(harness, kind) {
+  for (const slot of harness.fakeRoot.children) {
+    if (!slot.attrs || slot.attrs['data-dshl-slot'] === undefined) continue
+    const found = slot.children.find((c) => c.attrs['data-thought-buddy'] === kind)
+    if (found) return found
+  }
+  return undefined
 }
 
 /** 执行当前所有 interval 回调（打字机删除/输入用），直到没有 interval 或达到 guard 上限。 */
@@ -128,9 +189,7 @@ function fireTimeouts(harness) {
 }
 
 function eyePolygons(harness) {
-  const span = harness.fakeRoot.children.find(
-    (c) => c.attrs['data-thought-buddy'] === 'avatar',
-  )
+  const span = buddySpan(harness, 'avatar')
   if (!span) return null
   const g = span.children[0].children[0]
   const eyes = g.children.find((c) => c.tagName === 'g' && c.attrs['clip-path'])
@@ -163,18 +222,21 @@ function check(ok, label) {
   const h = createHarness()
   const { mod } = h
   check(typeof mod.apply === 'function', 'apply exported')
-  check(Array.isArray(mod.inject) && mod.inject.length === 0, `inject = ${JSON.stringify(mod.inject)} (empty — no cordis services needed)`)
+  check(
+    Array.isArray(mod.inject) && mod.inject.length === 1 && mod.inject[0] === 'dshLoaderUi',
+    `inject = ${JSON.stringify(mod.inject)} (declares the dshLoaderUi service)`,
+  )
 }
 
 /* ================= 2/3) 挂载与几何 ================= */
 {
   const h = createHarness()
   let cleanup = null
-  h.mod.apply({ effect: (fn) => { cleanup = fn(); return cleanup } })
+  h.mod.apply({ effect: (fn) => { cleanup = fn(); return cleanup }, dshLoaderUi: h.uiStub })
   check(typeof cleanup === 'function', 'effect cleanup registered')
 
-  const span = h.fakeRoot.children.find((c) => c.attrs['data-thought-buddy'] === 'avatar')
-  check(!!span, 'avatar span inserted into status element')
+  const span = buddySpan(h, 'avatar')
+  check(!!span, 'avatar span rendered into the dshLoader.ui mount node')
   const svg = span?.children[0]
   check(svg && svg.tagName === 'svg' && svg.attrs.viewBox === '0 0 259 259', 'svg viewBox correct')
   const g = svg?.children[0]
@@ -219,8 +281,8 @@ function check(ok, label) {
   const h = createHarness()
   h.context.localStorage.getItem = (key) =>
     key === 'dsh-thought-buddy.mode' ? 'emoji' : null
-  h.mod.apply({ effect: (fn) => fn() })
-  const span = h.fakeRoot.children.find((c) => c.attrs['data-thought-buddy'] === 'emoji')
+  h.mod.apply({ effect: (fn) => fn(), dshLoaderUi: h.uiStub })
+  const span = buddySpan(h, 'emoji')
   check(!!span && !!span.textContent, `emoji mode — glyph="${span?.textContent ?? ''}"`)
 }
 
@@ -228,7 +290,7 @@ function check(ok, label) {
 {
   let clock = 1000
   const h = createHarness({ now: () => clock })
-  h.mod.apply({ effect: (fn) => fn() })
+  h.mod.apply({ effect: (fn) => fn(), dshLoaderUi: h.uiStub })
 
   // 模拟 ~22s：先让 baseline 稳定（取最大眼高），再检测眨眼帧
   const events = []
@@ -272,7 +334,7 @@ function check(ok, label) {
 {
   let clock = 1000
   const h = createHarness({ now: () => clock })
-  h.mod.apply({ effect: (fn) => fn() })
+  h.mod.apply({ effect: (fn) => fn(), dshLoaderUi: h.uiStub })
 
   // 初始文字 = React 渲染的 "Deep diving..."
   check(h.textNode.textContent === 'Deep diving...', `initial status text = "${h.textNode.textContent}"`)
