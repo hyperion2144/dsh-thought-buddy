@@ -1,7 +1,7 @@
 {
   "name": "@dsh-plugin/dsh-thought-buddy",
-  "version": "0.2.0",
-  "description": "DSH web 插件：在「Deep diving...」状态前插入一个动态小表情 —— GrokBot 风格动画头像（纯 SVG + rAF，移植自 nasawz/GrokBot，无任何运行时依赖），也可切换为 emoji 轮播模式",
+  "version": "0.3.0",
+  "description": "DSH web 鎻掍欢锛氬湪銆孌eep diving...銆嶇姸鎬佸墠鎻掑叆涓€涓姩鎬佸皬琛ㄦ儏 鈥斺€?GrokBot 椋庢牸鍔ㄧ敾澶村儚锛堢函 SVG + rAF锛岀Щ妞嶈嚜 nasawz/GrokBot锛屾棤浠讳綍杩愯鏃朵緷璧栵級锛屼篃鍙垏鎹负 emoji 杞挱妯″紡",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -61,7 +61,7 @@
     "emoji"
   ],
   "peerDependencies": {
-    "@dsh-plugin/dsh-loader": "^1.1.0"
+    "@dsh-plugin/dsh-loader": "^1.2.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
