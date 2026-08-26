@@ -61,7 +61,7 @@
     "emoji"
   ],
   "peerDependencies": {
-    "@dsh-plugin/dsh-loader": "^1.2.0"
+    "@dsh-plugin/dsh-loader": "^1.3.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
