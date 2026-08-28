@@ -655,7 +655,9 @@ function tbStart(ui: TbUiApi): () => void {
   return ui.mount('conversation.status', {
     id: 'thought-buddy:buddy',
     // 锚点给出候选状态条；「是不是思考态」仍由本插件按文案判定。
-    when: (host) => /diving/i.test(host.textContent ?? ''),
+    // 文案随宿主版本而本地化：0.1.0/0.1.1 硬编码英文 "Deep diving..."，
+    // 0.1.2 起走 locale（中文界面为「深度求索中...」）——两种都认。
+    when: (host) => /diving|深度求索/i.test(host.textContent ?? ''),
     render: (mount, host) => {
       const handle = cfg.mode === 'emoji' ? tbMountEmoji(mount, cfg) : tbMountAvatar(mount, host, cfg);
       return () => handle?.stop();

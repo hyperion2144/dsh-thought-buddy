@@ -1,6 +1,6 @@
 {
   "name": "@dsh-plugin/dsh-thought-buddy",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "DSH web 鎻掍欢锛氬湪銆孌eep diving...銆嶇姸鎬佸墠鎻掑叆涓€涓姩鎬佸皬琛ㄦ儏 鈥斺€?GrokBot 椋庢牸鍔ㄧ敾澶村儚锛堢函 SVG + rAF锛岀Щ妞嶈嚜 nasawz/GrokBot锛屾棤浠讳綍杩愯鏃朵緷璧栵級锛屼篃鍙垏鎹负 emoji 杞挱妯″紡",
   "type": "module",
   "main": "lib/index.js",
