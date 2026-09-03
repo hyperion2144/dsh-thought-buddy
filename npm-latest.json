@@ -1,10 +1,10 @@
 {
   "name": "@dsh-plugin/dsh-thought-buddy",
-  "latest": "0.3.2",
-  "publishedAt": "2026-08-28T22:57:40.804Z",
+  "latest": "0.3.3",
+  "publishedAt": "2026-09-03T06:36:55.739Z",
   "dist": {
-    "tarball": "https://registry.npmjs.org/@dsh-plugin/dsh-thought-buddy/-/dsh-thought-buddy-0.3.2.tgz",
-    "integrity": "sha512-7fZ2p5vvm3tjJB4aoshr7xeo9kEPTMvtM2P5cOvgPIeXBvqFUvgRD4zLly+hyfD2aZaUyXCIoX1DJXVqN566jg==",
-    "unpackedSize": 167222
+    "tarball": "https://registry.npmjs.org/@dsh-plugin/dsh-thought-buddy/-/dsh-thought-buddy-0.3.3.tgz",
+    "integrity": "sha512-LaZnr1jWmlYhQ2f4csypvj/rPpL2clLFHuX8PLYLPiyygw6xHLcGYhB+CEZsGVOw6Y5jujnOlLA4t+c0W3Eadw==",
+    "unpackedSize": 311145
   }
 }
