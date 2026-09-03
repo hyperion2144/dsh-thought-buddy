@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-plugin/dsh-thought-buddy",
+  "latest": "0.3.2",
+  "publishedAt": "2026-08-28T22:57:40.804Z",
+  "dist": {
+    "tarball": "https://registry.npmjs.org/@dsh-plugin/dsh-thought-buddy/-/dsh-thought-buddy-0.3.2.tgz",
+    "integrity": "sha512-7fZ2p5vvm3tjJB4aoshr7xeo9kEPTMvtM2P5cOvgPIeXBvqFUvgRD4zLly+hyfD2aZaUyXCIoX1DJXVqN566jg==",
+    "unpackedSize": 167222
+  }
+}
