@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * gen-data.mjs — 生成 src/client/data.ts（纯脚本、无 ESM），数据源优先级：
+ * gen-data.mjs — 生成 src/client/data.ts（ESM 模块，导出三个 const 与类型），数据源优先级：
  *
  *   1) ref/GrokBot/lib/src/data/*.dart（上游 GrokBot 的 Dart 数据源，git 忽略）
  *   2) 缺失时回读现有 data.ts 幂等再生成（保证 `npm run gen` 在任何检出上都可用，

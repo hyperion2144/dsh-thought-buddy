@@ -20,13 +20,13 @@ import { fileURLToPath } from 'node:url'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const bundle = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
 
-/* ---------- 剥离 loader 包装，只取工厂内部代码 ---------- */
-const intro = 'var exports = module.exports;\n'
-const footer = 'exports.apply = apply;'
-const start = bundle.indexOf(intro) + intro.length
-const end = bundle.indexOf(footer)
-if (start < 0 || end < 0) throw new Error('cannot unwrap bundle')
-const inner = bundle.slice(start, end)
+/* ---------- 标准管线契约：整包求值，经 __ModuleLoader__ 壳取回声明 ----------
+ * tsdown 产物首行即 window.__ModuleLoader__.load({ id, factory })；在 vm 沙箱
+ * 里提供 window 桩捕获声明，再以「无 external」的 require 桩调工厂，取回
+ * module.exports（含 apply / inject）。不再按字节剥壳。 */
+if (!bundle.startsWith('window.__ModuleLoader__.load({')) {
+  throw new Error('lib/client.js is not wrapped in the __ModuleLoader__.load shell')
+}
 
 /* ---------- 最小 DOM / 浏览器桩 ---------- */
 class FakeNode {
@@ -83,7 +83,11 @@ function createHarness({ now = () => Date.now() } = {}) {
 
   const context = {
     console,
-    window: {},
+    window: {
+      __ModuleLoader__: {
+        load(declaration) { context.declaration = declaration },
+      },
+    },
     document: {
       createElementNS: (ns, tag) => new FakeNode(tag, ns),
       createElement: (tag) => new FakeNode(tag),
@@ -148,7 +152,10 @@ function createHarness({ now = () => Date.now() } = {}) {
     },
   }
 
-  const mod = runInContext(`(function () {\n${inner}\nreturn { apply, inject };\n})()`, context)
+  runInContext(bundle, context)
+  if (context.declaration === undefined) throw new Error('bundle did not register via __ModuleLoader__.load')
+  // 客户端无任何 external 运行时依赖；require 桩被调用即为错误。
+  const mod = context.declaration.factory((id) => { throw new Error(`unexpected require: ${id}`) })
   return { mod, fakeRoot, textNode, rafQueue, timers, context, uiStub }
 }
 

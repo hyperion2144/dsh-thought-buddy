@@ -1,4 +1,3 @@
-/// <reference path="./data.ts" />
 /* ============================================================================
  * dsh-thought-buddy — 客户端半区
  *
@@ -9,10 +8,13 @@
  *     球面转头投影与视线游移。
  *   - emoji 模式：在可配置的 emoji 列表间轮播，带弹跳入场动画。
  *
- * 本文件与 data.ts 均为「纯脚本」（无 ESM import/export，类型与数据在全局
- * 作用域共享），由 tsc 编译为 JS 后，scripts/build.mjs 将编译产物与 data.ts
- * 的编译产物一起包进 window.__ModuleLoader__ 工厂；data.js 必须先于本文件求值。
+ * 源码为纯 ESM；构建（tsdown，tsdown.client.config.mjs）把本文件与 data.ts
+ * 打包成 CJS 并包进 window.__ModuleLoader__.load({ id, factory }) 壳，
+ * 导出 apply / inject。ESM 模块作用域天然隔离共享 window 全局。
  * ========================================================================== */
+import { TB_EXPRESSIONS, TB_SHAPES, TB_STATES } from './data.js';
+import type { TbExpression, TbEyeRing, TbPoint, TbShape } from './data.js';
+
 'use strict';
 
 /* ======================= 配置（localStorage，可静默降级） ======================= */
@@ -685,7 +687,9 @@ interface TbClientContext {
   get?(name: string): unknown;
 }
 
-function apply(ctx: TbClientContext) {
+export { inject };
+
+export function apply(ctx: TbClientContext) {
   const ui = ctx.dshLoaderUi ?? (ctx.get?.('dshLoaderUi') as TbUiApi | undefined);
   if (ui === undefined) return;
   ctx.effect(() => tbStart(ui));
