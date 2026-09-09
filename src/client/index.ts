@@ -622,75 +622,111 @@ function tbMountEmoji(mount: Element, cfg: TbConfig): TbHandle | null {
   return { stop: () => clearInterval(timer) };
 }
 
-/* ====================== dshLoader.ui slot 注入 ====================== */
+/* ====================== 直接 DOM 注入（自包含，无 dsh-loader） ====================== */
 
-/** dshLoader.ui 中本插件用到的最小面（避免为纯脚本引入类型依赖）。 */
-interface TbUiApi {
-  mount(
-    anchor: string,
-    spec: {
-      id: string;
-      when?: (host: Element) => boolean;
-      render: (mount: HTMLElement, host: Element) => (() => void) | void;
-    },
-  ): () => void;
+/** 状态条选择器：主路径 + 兜底路径。 */
+const TB_STATUS_SELECTORS = [
+  '[data-conversation-scroll] [role="status"]',
+  '[role="status"]',
+];
+
+const TB_MOUNT_ID = 'thought-buddy:buddy';
+
+/** 在文档中查找所有候选状态条（主路径命中则不再走兜底）。 */
+function tbFindStatusHosts(): Element[] {
+  for (const sel of TB_STATUS_SELECTORS) {
+    const els = document.querySelectorAll(sel);
+    if (els.length > 0) return Array.from(els);
+  }
+  return [];
+}
+
+/** 判断状态条是否处于「思考中」状态。 */
+function tbIsThinking(host: Element): boolean {
+  return /diving|深度求索/i.test(host.textContent ?? '');
+}
+
+/** 在宿主首子前插入挂载节点（幂等）。 */
+function tbEnsureMount(host: Element): Element | null {
+  const existing = host.querySelector(`[data-thought-buddy-mount="${TB_MOUNT_ID}"]`);
+  if (existing) return existing;
+  const mount = document.createElement('span');
+  mount.dataset.thoughtBuddyMount = TB_MOUNT_ID;
+  host.insertBefore(mount, host.firstChild);
+  return mount;
+}
+
+/** 移除挂载节点。 */
+function tbRemoveMount(host: Element): void {
+  const existing = host.querySelector(`[data-thought-buddy-mount="${TB_MOUNT_ID}"]`);
+  if (existing) existing.remove();
 }
 
 /**
- * 启动：把小表情挂到 dsh-loader 的 `conversation.status` 锚点上。
+ * 启动：直接用 MutationObserver 监听状态条，注入小表情。
  *
- * 从「自己维护一套 DOM 注入」改为「向 loader 注册一个 slot」之后，下面这些不再
- * 由本插件实现，而由 `dshLoader.ui` 统一提供：
- *   - MutationObserver 与 requestAnimationFrame 合流节流；
- *   - 宿主选择器（主路径 `[data-conversation-scroll] [role="status"]` 与全文档
- *     兜底路径），现在是 loader 锚点表里的一条，dsh 改 DOM 只需改 loader；
- *   - 每宿主幂等、React 重渲染后的自愈补回、宿主脱离文档时的清理。
- *
- * 本插件只保留两件真正属于自己的判断：状态条文案是否是「Deep diving…」这类，
- * 以及渲染哪种表情。返回值是 loader 给的 disposer。
+ * 自包含实现，不依赖 dsh-loader。负责：
+ *   - 在文档中查找候选状态条（主路径 `[data-conversation-scroll] [role="status"]`
+ *     与全文档兜底路径 `[role="status"]`）；
+ *   - 按文案判定是否为思考态（`/diving|深度求索/i`）；
+ *   - 每宿主幂等挂载、React 重渲染后的自愈补回、宿主脱离文档时的清理。
  */
-function tbStart(ui: TbUiApi): () => void {
+function tbStart(): () => void {
   const cfg = tbConfig();
   if (!cfg.enabled) return () => {};
   tbInjectStyles();
 
-  return ui.mount('conversation.status', {
-    id: 'thought-buddy:buddy',
-    // 锚点给出候选状态条；「是不是思考态」仍由本插件按文案判定。
-    // 文案随宿主版本而本地化：0.1.0/0.1.1 硬编码英文 "Deep diving..."，
-    // 0.1.2 起走 locale（中文界面为「深度求索中...」）——两种都认。
-    when: (host) => /diving|深度求索/i.test(host.textContent ?? ''),
-    render: (mount, host) => {
-      const handle = cfg.mode === 'emoji' ? tbMountEmoji(mount, cfg) : tbMountAvatar(mount, host, cfg);
-      return () => handle?.stop();
-    },
-  });
+  const cleanups = new Map<Element, () => void>();
+
+  function attach(host: Element): void {
+    if (cleanups.has(host)) return; // 已挂载
+    if (!tbIsThinking(host)) return;
+    const mount = tbEnsureMount(host);
+    if (!mount) return;
+    const handle =
+      cfg.mode === 'emoji' ? tbMountEmoji(mount, cfg) : tbMountAvatar(mount, host, cfg);
+    cleanups.set(host, () => handle?.stop());
+  }
+
+  function detach(host: Element): void {
+    const cleanup = cleanups.get(host);
+    if (cleanup) {
+      cleanup();
+      cleanups.delete(host);
+    }
+    tbRemoveMount(host);
+  }
+
+  function scan(): void {
+    const hosts = tbFindStatusHosts();
+    for (const host of hosts) {
+      if (host.isConnected) attach(host);
+    }
+    for (const host of Array.from(cleanups.keys())) {
+      if (!host.isConnected) detach(host);
+    }
+  }
+
+  // 初始扫描
+  scan();
+
+  // MutationObserver 监听 DOM 变化（子树增删 + 文本变化）
+  const observer = new MutationObserver(() => scan());
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+  return () => {
+    observer.disconnect();
+    for (const host of Array.from(cleanups.keys())) detach(host);
+  };
 }
 
 /* ========================= 插件入口 ========================= */
 
-/**
- * cordis 服务依赖：`dshLoaderUi` 由 @dsh-plugin/dsh-loader 的浏览器半区
- * `ctx.provide('dshLoaderUi', ui)` 提供。声明它有两个作用：cordis 保证 loader
- * 先激活（`dsh.client.immediately` 只保证工厂已注册，不保证 apply 已跑），并且
- * loader 缺席时本插件不会激活，而不是崩在 undefined 上。
- *
- * 注意：这里的 inject 是 cordis 服务名，与 package.json 的 dsh.client.inject
- * （客户端模块依赖声明，用包名）不是一回事。
- */
-const inject: unknown[] = ['dshLoaderUi'];
-
 /** 客户端 cordis Context 的最小结构。 */
 interface TbClientContext {
   effect(callback: () => () => void): unknown;
-  dshLoaderUi?: TbUiApi;
-  get?(name: string): unknown;
 }
 
-export { inject };
-
 export function apply(ctx: TbClientContext) {
-  const ui = ctx.dshLoaderUi ?? (ctx.get?.('dshLoaderUi') as TbUiApi | undefined);
-  if (ui === undefined) return;
-  ctx.effect(() => tbStart(ui));
+  ctx.effect(() => tbStart());
 }

@@ -92,6 +92,7 @@ function createHarness({ now = () => Date.now() } = {}) {
       createElementNS: (ns, tag) => new FakeNode(tag, ns),
       createElement: (tag) => new FakeNode(tag),
       head: new FakeNode('head'),
+      body: new FakeNode('body'),
       documentElement: new FakeNode('html'),
       querySelector: () => null,
       querySelectorAll: (sel) => (sel.includes('status') ? [fakeRoot] : []),
@@ -162,12 +163,12 @@ function createHarness({ now = () => Date.now() } = {}) {
 /**
  * 找到插件渲染出的表情节点。
  *
- * 层级比迁移前多一层：loader 先在状态条里放一个 data-dshl-slot 挂载节点，插件
+ * 自包含模式下插件直接在状态条首子前插入 data-thought-buddy-mount 挂载节点，
  * 再往其中追加 data-thought-buddy。
  */
 function buddySpan(harness, kind) {
   for (const slot of harness.fakeRoot.children) {
-    if (!slot.attrs || slot.attrs['data-dshl-slot'] === undefined) continue
+    if (!slot.dataset || slot.dataset.thoughtBuddyMount === undefined) continue
     const found = slot.children.find((c) => c.attrs['data-thought-buddy'] === kind)
     if (found) return found
   }
@@ -229,17 +230,13 @@ function check(ok, label) {
   const h = createHarness()
   const { mod } = h
   check(typeof mod.apply === 'function', 'apply exported')
-  check(
-    Array.isArray(mod.inject) && mod.inject.length === 1 && mod.inject[0] === 'dshLoaderUi',
-    `inject = ${JSON.stringify(mod.inject)} (declares the dshLoaderUi service)`,
-  )
 }
 
 /* ================= 2/3) 挂载与几何 ================= */
 {
   const h = createHarness()
   let cleanup = null
-  h.mod.apply({ effect: (fn) => { cleanup = fn(); return cleanup }, dshLoaderUi: h.uiStub })
+  h.mod.apply({ effect: (fn) => { cleanup = fn(); return cleanup } })
   check(typeof cleanup === 'function', 'effect cleanup registered')
 
   const span = buddySpan(h, 'avatar')
@@ -288,7 +285,7 @@ function check(ok, label) {
   const h = createHarness()
   h.context.localStorage.getItem = (key) =>
     key === 'dsh-thought-buddy.mode' ? 'emoji' : null
-  h.mod.apply({ effect: (fn) => fn(), dshLoaderUi: h.uiStub })
+  h.mod.apply({ effect: (fn) => fn() })
   const span = buddySpan(h, 'emoji')
   check(!!span && !!span.textContent, `emoji mode — glyph="${span?.textContent ?? ''}"`)
 }
@@ -297,7 +294,7 @@ function check(ok, label) {
 {
   let clock = 1000
   const h = createHarness({ now: () => clock })
-  h.mod.apply({ effect: (fn) => fn(), dshLoaderUi: h.uiStub })
+  h.mod.apply({ effect: (fn) => fn() })
 
   // 模拟 ~22s：先让 baseline 稳定（取最大眼高），再检测眨眼帧
   const events = []
@@ -341,7 +338,7 @@ function check(ok, label) {
 {
   let clock = 1000
   const h = createHarness({ now: () => clock })
-  h.mod.apply({ effect: (fn) => fn(), dshLoaderUi: h.uiStub })
+  h.mod.apply({ effect: (fn) => fn() })
 
   // 初始文字 = React 渲染的 "Deep diving..."
   check(h.textNode.textContent === 'Deep diving...', `initial status text = "${h.textNode.textContent}"`)
