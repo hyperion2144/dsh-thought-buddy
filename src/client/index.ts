@@ -218,8 +218,16 @@ interface TbTypewriter {
  * 先逐字符删除当前文字，停顿后逐字符打出列表中的下一个词（带 "..."）。
  * React 渲染的文本 fiber 的 children 字符串始终不变，因此不会覆盖我们的修改。
  * 返回 { switchWord, stop }；root 卸载时 stop() 由观察器清理。
+ *
+ * 计时器所有权模型：任意时刻至多一个循环计时器（删字或打字）与至多一个
+ * 待决停顿 timeout，二者都登记在案、由 cancelAll 成对取消；配合代际号 epoch ——
+ * switchWord/stop 递增代际，在途回调据 gen !== epoch 自弃。这杜绝了三类历史缺陷：
+ * 待决停顿逃过清理、startTyping 覆盖 timer 引用产生孤儿循环、孤儿完成路径
+ * （timer 已指向别处）永远清不掉自己，导致文字越切越快、持续闪烁。
+ *
+ * 导出仅供无浏览器验证（verify.mjs 打字机并发回归）直接驱动。
  */
-function tbStartTypewriter(root: Element): TbTypewriter | null {
+export function tbStartTypewriter(root: Element): TbTypewriter | null {
   let textNode: Text | null = null;
   for (const node of root.childNodes) {
     if (node.nodeType === 3) {
@@ -232,7 +240,12 @@ function tbStartTypewriter(root: Element): TbTypewriter | null {
   const DELETE_MS = 40;
   const TYPE_MS = 46;
   const HOLD_MS = 420;
+  /** 唯一活跃的循环计时器（删字或打字）。 */
   let timer: number | null = null;
+  /** 唯一活跃的停顿 timeout。 */
+  let hold: number | null = null;
+  /** 代际号：switchWord/stop 递增；代际不符的回调一律自弃。 */
+  let epoch = 0;
   let wordIndex = -1;
 
   const pickNext = (): string => {
@@ -245,18 +258,32 @@ function tbStartTypewriter(root: Element): TbTypewriter | null {
     return TB_WORDS[next];
   };
 
-  const clearTimer = (): void => {
+  /** 成对取消当前全部计时器（循环计时器 + 待决停顿）。 */
+  const cancelAll = (): void => {
     if (timer !== null) {
       clearInterval(timer);
       timer = null;
     }
+    if (hold !== null) {
+      clearTimeout(hold);
+      hold = null;
+    }
   };
 
-  const startTyping = (word: string): void => {
+  /** 结束当前轮次：作废代际并清场，保证不存在清不掉自己的回调。 */
+  const finish = (): void => {
+    epoch += 1;
+    cancelAll();
+  };
+
+  const startTyping = (word: string, gen: number): void => {
+    if (gen !== epoch) return; // 陈旧调用：不得触碰现行计时器
+    cancelAll(); // 防御：任何路径下不允许第二个循环计时器
     let i = 0;
     timer = setInterval(() => {
+      if (gen !== epoch) return; // 陈旧回调：不碰任何现行计时器
       if (!root.isConnected) {
-        clearTimer();
+        finish();
         return;
       }
       i += 1;
@@ -264,26 +291,28 @@ function tbStartTypewriter(root: Element): TbTypewriter | null {
         textNode.textContent = word.slice(0, i);
       } else {
         textNode.textContent = word + '...';
-        clearTimer();
+        finish();
       }
     }, TYPE_MS);
   };
 
-  /** 删除当前文字 → 停顿 → 逐字打出下一个词。 */
+  /** 删除当前文字 → 停顿 → 逐字打出下一个词。任意相位可安全打断。 */
   const switchWord = (): void => {
-    clearTimer();
+    finish(); // 作废在途回调（含待决停顿 timeout）并清场
+    const gen = epoch;
     timer = setInterval(() => {
+      if (gen !== epoch) return; // 陈旧回调：不碰任何现行计时器
       if (!root.isConnected) {
-        clearTimer();
+        finish(); // 宿主脱离：作废代际并清场，与打字路径同一语义
         return;
       }
       const t = textNode.textContent ?? '';
       if (t.length <= 1) {
-        clearTimer();
+        cancelAll();
         textNode.textContent = '';
-        setTimeout(() => {
-          if (!root.isConnected) return;
-          startTyping(pickNext());
+        hold = setTimeout(() => {
+          if (gen !== epoch || !root.isConnected) return;
+          startTyping(pickNext(), gen);
         }, HOLD_MS);
       } else {
         textNode.textContent = t.slice(0, -1);
@@ -293,7 +322,7 @@ function tbStartTypewriter(root: Element): TbTypewriter | null {
 
   return {
     switchWord,
-    stop: clearTimer,
+    stop: finish,
   };
 }
 

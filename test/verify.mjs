@@ -9,8 +9,9 @@
  *   5) emoji 模式挂载
  *   6) 眨眼节奏：用可控时钟模拟 ~22s，眨眼事件间隔 ≥ 3.4s（回归：修复了
  *      眨眼结束后 blinkAt 用了毫秒小数值导致连续眨眼的 bug）
- *
- * 用法：node test/verify.mjs
+ *   7) 打字机并发回归（计时器所有权）：HOLD 窗口打断最小复现、随机交错浸泡、
+ *      节拍精确性、stop 零残留（回归：修复了并发/不可清除打字 interval 导致
+ *      文字越切越快、持续闪烁的 bug）
  */
 import { readFileSync } from 'node:fs'
 import { createContext, runInContext } from 'node:vm'
@@ -394,5 +395,169 @@ function check(ok, label) {
   )
 }
 
+/* ================= 7) 打字机并发回归（计时器所有权） ================= */
+{
+  const countIntervals = (h) => [...h.timers.values()].filter((t) => t.kind === 'interval').length
+  const countTimeouts = (h) => [...h.timers.values()].filter((t) => t.kind === 'timeout').length
+  /** 触发一次待决停顿回调（一次性）。 */
+  const fireTimeout = (h) => {
+    const e = [...h.timers.entries()].find(([, t]) => t.kind === 'timeout')
+    if (e) { h.timers.delete(e[0]); e[1].fn() }
+    return !!e
+  }
+  /** 触发循环计时器的一拍（不手动摘除，由回调自身清场）。 */
+  const fireIntervalTick = (h) => {
+    const e = [...h.timers.entries()].find(([, t]) => t.kind === 'interval')
+    if (e) e[1].fn()
+    return !!e
+  }
+
+  /* 7a) HOLD 窗口打断（旧缺陷最小复现）：switchWord 落在「删字完成、停顿
+   * timeout 待决」窗口内。旧实现：待决 timeout 逃过清理 → 两次 startTyping →
+   * 孤儿打字 interval 永远清不掉自己 → 文字越切越快、持续闪烁。 */
+  {
+    const h = createHarness()
+    const tw = h.mod.tbStartTypewriter(h.fakeRoot)
+    check(typeof tw?.switchWord === 'function' && typeof tw?.stop === 'function', 'tbStartTypewriter exported — { switchWord, stop }')
+    h.textNode.textContent = 'Working...'
+    tw.switchWord()
+    let fires = 0
+    while (countTimeouts(h) === 0 && fires++ < 50) fireIntervalTick(h)
+    check(
+      h.textNode.textContent === '' && countIntervals(h) === 0 && countTimeouts(h) === 1,
+      'delete→hold: text empty, 0 intervals, exactly 1 pending hold timeout',
+    )
+    tw.switchWord()
+    check(
+      countTimeouts(h) === 0 && countIntervals(h) === 1,
+      'switchWord during hold window cancels the pending timeout — single repeating timer',
+    )
+    // 跑到静默：任意时刻 ≤1 个循环计时器，最终零残留
+    let maxIntervals = 0
+    let guard = 0
+    while (h.timers.size > 0 && guard++ < 500) {
+      maxIntervals = Math.max(maxIntervals, countIntervals(h))
+      if (!fireTimeout(h)) fireIntervalTick(h)
+    }
+    check(
+      maxIntervals <= 1 && h.timers.size === 0,
+      `hold-window interruption: max intervals ${maxIntervals} ≤1, zero residual timers`,
+    )
+    check(
+      /^[A-Za-z]+\.\.\.$/.test(h.textNode.textContent),
+      `interrupted cycle still ends clean ("${h.textNode.textContent}")`,
+    )
+  }
+
+  /* 7b) 随机交错浸泡：switchWord/stop/计时器 tick 随机交错，任意瞬时
+   * 循环计时器 ≤1、待决停顿 ≤1，文本恒为「词前缀或 词+...」；stop 后零残留。 */
+  {
+    const h = createHarness()
+    const tw = h.mod.tbStartTypewriter(h.fakeRoot)
+    h.textNode.textContent = 'Working...'
+    let seed = 42
+    const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648
+    let maxIntervals = 0
+    let maxTimeouts = 0
+    let ok = true
+    let usedStop = false
+    for (let step = 0; step < 20000 && ok; step++) {
+      const r = rand()
+      if (r < 0.12) {
+        tw.switchWord()
+      } else if (r < 0.15 && step > 100) {
+        tw.stop()
+        usedStop = true
+      } else if (!fireTimeout(h)) {
+        if (!fireIntervalTick(h)) tw.switchWord() // 空转点火
+      }
+      maxIntervals = Math.max(maxIntervals, countIntervals(h))
+      maxTimeouts = Math.max(maxTimeouts, countTimeouts(h))
+      if (countIntervals(h) > 1 || countTimeouts(h) > 1 || (countIntervals(h) >= 1 && countTimeouts(h) >= 1)) ok = false
+      if (!/^[A-Za-z]*\.{0,3}$/.test(h.textNode.textContent)) ok = false
+    }
+    check(ok, 'soak 20k random actions — invariants hold (≤1 repeating timer, ≤1 hold, clean text prefixes)')
+    check(maxIntervals <= 1 && maxTimeouts <= 1, `peak concurrency over soak: intervals=${maxIntervals}, timeouts=${maxTimeouts}`)
+    check(usedStop, 'soak exercised stop() mid-run')
+    const frozen = h.textNode.textContent
+    tw.stop()
+    check(
+      h.timers.size === 0 && h.textNode.textContent === frozen,
+      `stop() — zero residual timers (${h.timers.size}), text frozen at "${frozen}"`,
+    )
+  }
+
+  /* 7c) 节拍精确性：在「打字相位进行中」真实打断，下一周期拍数与文本长度
+   * 严格一致，且与基线周期同一节律（无节拍丢失/累积漂移）。 */
+  {
+    const h = createHarness()
+    const tw = h.mod.tbStartTypewriter(h.fakeRoot)
+    h.textNode.textContent = 'Working...'
+    const deleteUntilHold = () => {
+      let ticks = 0
+      while (countTimeouts(h) === 0 && ticks++ < 60) fireIntervalTick(h)
+      return ticks
+    }
+    const typeUntilDone = () => {
+      let ticks = 0
+      while (!/\.\.\.$/.test(h.textNode.textContent) && ticks++ < 60) fireIntervalTick(h)
+      return ticks
+    }
+    // 基线周期：'Working...'（10 字符）→ 删 10 拍 + 停顿 + 打 W 拍
+    tw.switchWord()
+    const baselineDeleteTicks = deleteUntilHold()
+    check(baselineDeleteTicks === 10, `baseline delete ticks exact: ${baselineDeleteTicks} === 10 ("Working...")`)
+    fireTimeout(h)
+    const baselineTypeTicks = typeUntilDone()
+    const baselineText = h.textNode.textContent
+    check(
+      /\.\.\.$/.test(baselineText) && baselineTypeTicks === baselineText.length - 3,
+      `baseline cycle completes on rhythm: ${baselineTypeTicks} === "${baselineText}".length-3 (${baselineText.length - 3})`,
+    )
+    // 真实打断：新一轮打字进行 3 拍（打字 interval 存活且已写 3 字符前缀）后 switchWord
+    tw.switchWord()
+    deleteUntilHold()
+    fireTimeout(h) // → 打字 interval 已武装
+    fireIntervalTick(h)
+    fireIntervalTick(h)
+    fireIntervalTick(h)
+    tw.switchWord() // ← 打字相位中途打断
+    const lenAtSwitch = h.textNode.textContent.length
+    check(lenAtSwitch === 3, `interrupt landed mid-typing (text = "${h.textNode.textContent}", ${lenAtSwitch} chars)`)
+    const deleteTicks = deleteUntilHold()
+    check(deleteTicks === lenAtSwitch, `post-interrupt delete ticks exact: ${deleteTicks} === text length ${lenAtSwitch}`)
+    fireTimeout(h)
+    const typeTicks = typeUntilDone()
+    const finalText = h.textNode.textContent
+    check(
+      /\.\.\.$/.test(finalText) && typeTicks === finalText.length - 3,
+      `post-interrupt typing ticks exact: ${typeTicks} === "${finalText}".length-3 (${finalText.length - 3})`,
+    )
+  }
+
+  /* 7d) 宿主脱离：删字相位脱离 → 计时器自清；停顿相位脱离 → 回调不再点火。 */
+  {
+    const h = createHarness()
+    const tw = h.mod.tbStartTypewriter(h.fakeRoot)
+    h.textNode.textContent = 'Working...'
+    tw.switchWord()
+    const del = [...h.timers.values()].find((x) => x.kind === 'interval')
+    h.fakeRoot.isConnected = false
+    del.fn()
+    check(h.timers.size === 0, 'detach during delete phase clears all timers')
+
+    h.fakeRoot.isConnected = true
+    h.textNode.textContent = ''
+    tw.switchWord() // 空文本 → 首拍即进停顿
+    const del2 = [...h.timers.values()].find((x) => x.kind === 'interval')
+    del2.fn()
+    check([...h.timers.values()].some((x) => x.kind === 'timeout'), 'hold armed on empty text')
+    h.fakeRoot.isConnected = false
+    const holdEntry = [...h.timers.entries()].find(([, x]) => x.kind === 'timeout')
+    h.timers.delete(holdEntry[0])
+    holdEntry[1].fn()
+    check(h.timers.size === 0, 'hold callback after detach arms nothing')
+  }
+}
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)
